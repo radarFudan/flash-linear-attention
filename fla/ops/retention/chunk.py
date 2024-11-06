@@ -12,6 +12,18 @@ from fla.utils import contiguous
 
 
 @triton.jit
+def parameterization_in(lambdas):
+    # return tl.math.sqrt(lambdas / (1-lambdas))
+    return tl.math.log2(lambdas)
+
+
+@triton.jit
+def parameterization_out(weights):
+    # return 1 - 1 / (1 + weights)
+    return tl.math.exp2(weights)
+
+
+@triton.jit
 def chunk_retention_fwd_kernel_h(
     k,
     v,
@@ -39,10 +51,10 @@ def chunk_retention_fwd_kernel_h(
 ):
     i_k, i_v, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_h = i_bh % H
-    b_b = tl.math.log2(1 - tl.math.pow(2, -5 - i_h * 1.0))
+    b_b = parameterization_in(1.0 - tl.math.pow(2, -10 - i_h * 1.0))
 
     o_i = tl.arange(0, BT)
-    d_b, d_i = tl.math.exp2(BT * b_b), tl.math.exp2((BT - o_i - 1) * b_b)
+    d_b, d_i = parameterization_out(BT * b_b), parameterization_out((BT - o_i - 1) * b_b)
     # [BK, BV]
     b_h = tl.zeros([BK, BV], dtype=tl.float32)
 
@@ -62,8 +74,8 @@ def chunk_retention_fwd_kernel_h(
         b_v = tl.load(p_v, boundary_check=(0, 1))
         # [BK, BV]
         if i_t == NT - 1 and (T % BT) != 0:
-            d_b = tl.math.exp2((T % BT) * b_b)
-            d_i = tl.math.exp2(((T % BT) - o_i - 1) * b_b)
+            d_b = parameterization_out((T % BT) * b_b)
+            d_i = parameterization_out(((T % BT) - o_i - 1) * b_b)
         b_h = d_b * b_h + tl.dot(b_k, (b_v * d_i[:, None]).to(b_k.dtype), allow_tf32=False)
 
     if STORE_FINAL_STATE:
@@ -97,12 +109,12 @@ def chunk_retention_fwd_kernel_o(
 ):
     i_v, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_h = i_bh % H
-    b_b = tl.math.log2(1 - tl.math.pow(2, -5 - i_h * 1.0))
+    b_b = parameterization_in(1.0 - tl.math.pow(2, -10 - i_h * 1.0))
 
     o_i = tl.arange(0, BT)
-    d_i = tl.math.exp2((o_i + 1) * b_b)
+    d_i = parameterization_out((o_i + 1) * b_b)
     m_s = o_i[:, None] >= o_i[None, :]
-    d_s = tl.where(m_s, tl.math.exp2((o_i[:, None] - o_i[None, :]) * b_b), 0)
+    d_s = tl.where(m_s, parameterization_out((o_i[:, None] - o_i[None, :]) * b_b), 0)
 
     b_o = tl.zeros([BT, BV], dtype=tl.float32)
     b_s = tl.zeros([BT, BT], dtype=tl.float32)
@@ -152,10 +164,10 @@ def chunk_retention_bwd_kernel_dh(
 ):
     i_k, i_v, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_h = i_bh % H
-    b_b = tl.math.log2(1 - tl.math.pow(2, -5 - i_h * 1.0))
+    b_b = parameterization_in(1.0 - tl.math.pow(2, -10 - i_h * 1.0))
 
     o_i = tl.arange(0, BT)
-    d_b, d_i = tl.math.exp2(BT * b_b), tl.math.exp2((o_i + 1) * b_b)
+    d_b, d_i = parameterization_out(BT * b_b), parameterization_out((o_i + 1) * b_b)
     # [BK, BV]
     b_dh = tl.zeros([BK, BV], dtype=tl.float32)
     for i_t in range(NT - 1, -1, -1):
@@ -205,13 +217,13 @@ def chunk_retention_bwd_kernel_dqkv(
     i_k, i_t, i_bh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     i_h = i_bh % H
     n_bh = tl.num_programs(2)
-    b_b = tl.math.log2(1 - tl.math.pow(2, -5 - i_h * 1.0))
+    b_b = parameterization_in(1.0 - tl.math.pow(2, -10 - i_h * 1.0))
 
     o_i = tl.arange(0, BT)
-    d_q, d_k = tl.math.exp2((o_i + 1) * b_b), tl.math.exp2((BT - o_i - 1) * b_b)
+    d_q, d_k = parameterization_out((o_i + 1) * b_b), parameterization_out((BT - o_i - 1) * b_b)
     d_q = (d_q * scale).to(d_q.dtype)
     m_s = o_i[:, None] >= o_i[None, :]
-    d_s = tl.where(m_s, tl.math.exp2((o_i[:, None] - o_i[None, :]) * b_b), 0) * scale
+    d_s = tl.where(m_s, parameterization_out((o_i[:, None] - o_i[None, :]) * b_b), 0) * scale
 
     p_q = tl.make_block_ptr(q + i_bh * s_qk_h, (K, T), (s_qk_d, s_qk_t), (i_k * BK, i_t * BT), (BK, BT), (0, 1))
     p_k = tl.make_block_ptr(k + i_bh * s_qk_h, (T, K), (s_qk_t, s_qk_d), (i_t * BT, i_k * BK), (BT, BK), (1, 0))

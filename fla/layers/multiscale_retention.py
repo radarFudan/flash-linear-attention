@@ -214,6 +214,7 @@ class MultiScaleRetention(nn.Module):
 
         state = last_state[-1] if use_cache else None
         if mode == 'chunk':
+            print("Using chunk")
             o, recurrent_state = chunk_retention(q, k, v, initial_state=state, output_final_state=use_cache)
         elif mode == 'fused_chunk':
             o, recurrent_state = fused_chunk_retention(q, k, v, initial_state=state, output_final_state=use_cache)
